@@ -30,6 +30,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/petermattis/pebble"
+	"github.com/petermattis/pebble/cache"
+	"github.com/petermattis/pebble/db"
 )
 
 func TestRocksDBMap(t *testing.T) {
@@ -396,7 +399,7 @@ func BenchmarkRocksDBMapWrite(b *testing.B) {
 		}
 	}()
 	ctx := context.Background()
-	tempEngine, err := NewTempEngine(base.TempStorageConfig{Path: dir}, base.DefaultTestStoreSpec)
+	tempEngine, err := NewTempEngine(base.TempStorageConfig{Path: dir}, base.StoreSpec{})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -417,10 +420,78 @@ func BenchmarkRocksDBMapWrite(b *testing.B) {
 							b.Fatal(err)
 						}
 					}()
+					var key []byte
+					var value []byte
 					for j := 0; j < inputSize; j++ {
-						k := fmt.Sprintf("%d", rng.Int())
-						v := fmt.Sprintf("%d", rng.Int())
-						if err := batchWriter.Put([]byte(k), []byte(v)); err != nil {
+						key = encoding.EncodeUint32Ascending(key[:0], rng.Uint32())
+						value = encoding.EncodeUint32Ascending(value[:0], rng.Uint32())
+						if err := batchWriter.Put(key, value); err != nil {
+							b.Fatal(err)
+						}
+					}
+				}()
+			}
+		})
+	}
+}
+
+func BenchmarkPebbleMapWrite(b *testing.B) {
+	dir, err := ioutil.TempDir("", "BenchmarkPebbleMapWrite")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			b.Fatal(err)
+		}
+	}()
+
+	d, err := pebble.Open(dir, &db.Options{
+		Cache:                       cache.New(1 << 20),
+		DisableWAL:                  true,
+		MemTableSize:                1 << 20,
+		MemTableStopWritesThreshold: 4,
+		L0CompactionThreshold:       2,
+		L0SlowdownWritesThreshold:   20,
+		L0StopWritesThreshold:       32,
+		L1MaxBytes:                  64 << 20, // 64 MB
+		Levels: []db.LevelOptions{{
+			BlockSize: 32 << 10,
+		}},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer d.Close()
+
+	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
+
+	for _, inputSize := range []int{1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20} {
+		b.Run(fmt.Sprintf("InputSize%d", inputSize), func(b *testing.B) {
+			prefix := encoding.EncodeUvarintAscending([]byte(nil), generateTempStorageID())
+
+			for i := 0; i < b.N; i++ {
+				func() {
+					batch := d.NewBatch()
+					defer func() {
+						if err := batch.Commit(db.NoSync); err != nil {
+							b.Fatal(err)
+						}
+						_ = batch.Close()
+						if err := d.DeleteRange([]byte{}, []byte("\xff\xff\xff\xff\xff"), db.NoSync); err != nil {
+							b.Fatal(err)
+						}
+						if err := d.AsyncFlush(); err != nil {
+							b.Fatal(err)
+						}
+					}()
+					var key []byte
+					var value []byte
+					for j := 0; j < inputSize; j++ {
+						key = append(key[:0], prefix...)
+						key = encoding.EncodeUint32Ascending(key, rng.Uint32())
+						value = encoding.EncodeUint32Ascending(value[:0], rng.Uint32())
+						if err := batch.Set(key, value, nil); err != nil {
 							b.Fatal(err)
 						}
 					}
@@ -455,10 +526,12 @@ func BenchmarkRocksDBMapIteration(b *testing.B) {
 	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
 
 	for _, inputSize := range []int{1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20} {
-		for i := 0; i < inputSize; i++ {
-			k := fmt.Sprintf("%d", rng.Int())
-			v := fmt.Sprintf("%d", rng.Int())
-			if err := diskMap.Put([]byte(k), []byte(v)); err != nil {
+		var key []byte
+		var value []byte
+		for j := 0; j < inputSize; j++ {
+			key = encoding.EncodeUint32Ascending(key[:0], rng.Uint32())
+			value = encoding.EncodeUint32Ascending(value[:0], rng.Uint32())
+			if err := diskMap.Put(key, value); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -478,5 +551,69 @@ func BenchmarkRocksDBMapIteration(b *testing.B) {
 				i.Close()
 			}
 		})
+	}
+}
+
+func BenchmarkPebbleMapIteration(b *testing.B) {
+	dir, err := ioutil.TempDir("", "BenchmarkPebbleMapIteration")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			b.Fatal(err)
+		}
+	}()
+	rng := rand.New(rand.NewSource(timeutil.Now().UnixNano()))
+
+	d, err := pebble.Open(dir, &db.Options{
+		Cache:                       cache.New(1 << 20),
+		DisableWAL:                  true,
+		MemTableSize:                64 << 20,
+		MemTableStopWritesThreshold: 4,
+		L0CompactionThreshold:       2,
+		L0SlowdownWritesThreshold:   20,
+		L0StopWritesThreshold:       32,
+		L1MaxBytes:                  64 << 20, // 64 MB
+		Levels: []db.LevelOptions{{
+			BlockSize: 32 << 10,
+		}},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer d.Close()
+
+	for _, inputSize := range []int{1 << 12, 1 << 14, 1 << 16, 1 << 18, 1 << 20} {
+		prefix := encoding.EncodeUvarintAscending([]byte(nil), generateTempStorageID())
+
+		var key []byte
+		var value []byte
+		for j := 0; j < inputSize; j++ {
+			key = append(key[:0], prefix...)
+			key = encoding.EncodeUint32Ascending(key, rng.Uint32())
+			value = encoding.EncodeUint32Ascending(value[:0], rng.Uint32())
+			if err := d.Set(key, value, db.NoSync); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		b.Run(fmt.Sprintf("InputSize%d", inputSize), func(b *testing.B) {
+			for j := 0; j < b.N; j++ {
+				i := d.NewIter(nil)
+				for i.First(); i.Valid(); i.Next() {
+					_ = i.Key()
+					_ = i.Value()
+				}
+				i.Close()
+			}
+		})
+
+		if err := d.DeleteRange([]byte{}, []byte("\xff\xff\xff\xff\xff"), db.NoSync); err != nil {
+			b.Fatal(err)
+		}
+		if err := d.AsyncFlush(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
