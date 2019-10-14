@@ -53,7 +53,7 @@ func (l InsertsDataLoader) InitialDataLoad(
 	for _, table := range tables {
 		createStmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" %s`, table.Name, table.Schema)
 		if _, err := db.ExecContext(ctx, createStmt); err != nil {
-			return 0, errors.Wrapf(err, "could not create table: %s", table.Name)
+			return 0, errors.Wrapf(err, "could not create table: %s\n%s", table.Name, createStmt)
 		}
 	}
 

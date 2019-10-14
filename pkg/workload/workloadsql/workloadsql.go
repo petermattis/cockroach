@@ -73,14 +73,15 @@ func maybeDisableMergeQueue(db *gosql.DB) error {
 
 // Split creates the range splits defined by the given table.
 func Split(ctx context.Context, db *gosql.DB, table workload.Table, concurrency int) error {
+	if table.Splits.NumBatches <= 0 {
+		return nil
+	}
+
 	// Prevent the merge queue from immediately discarding our splits.
 	if err := maybeDisableMergeQueue(db); err != nil {
 		return err
 	}
 
-	if table.Splits.NumBatches <= 0 {
-		return nil
-	}
 	splitPoints := make([][]interface{}, 0, table.Splits.NumBatches)
 	for splitIdx := 0; splitIdx < table.Splits.NumBatches; splitIdx++ {
 		splitPoints = append(splitPoints, table.Splits.BatchRows(splitIdx)...)

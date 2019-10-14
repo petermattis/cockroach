@@ -264,9 +264,9 @@ func runInitImpl(
 			return err
 		}
 	}
-	if _, err := initDB.ExecContext(ctx, `CREATE DATABASE IF NOT EXISTS `+dbName); err != nil {
-		return err
-	}
+	// if _, err := initDB.ExecContext(ctx, `CREATE DATABASE IF NOT EXISTS `+dbName); err != nil {
+	// 	return err
+	// }
 
 	var l workload.InitialDataLoader
 	switch strings.ToLower(*dataLoader) {
